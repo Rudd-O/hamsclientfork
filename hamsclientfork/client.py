@@ -5,7 +5,6 @@ import logging
 import pandas as pd
 import requests  # type: ignore
 
-from bs4 import BeautifulSoup
 from enum import Enum
 from typing import Any, TypedDict
 
@@ -29,7 +28,6 @@ _HEADERS = {
 
 MS_BASE_URL = "https://www.meteosuisse.admin.ch"
 JSON_FORECAST_URL = "https://app-prod-ws.meteoswiss-app.ch/v1/forecast?plz={}00&graph=false&warning=true"
-MS_SEARCH_URL = "https://www.meteosuisse.admin.ch/home/actualite/infos.html?ort={}&pageIndex=0&tab=search_tab"
 CURRENT_CONDITION_URL = (
     "https://data.geo.admin.ch/ch.meteoschweiz.messwerte-aktuell/VQHA80.csv"
 )
@@ -37,8 +35,9 @@ STATION_URL = "https://data.geo.admin.ch/ch.meteoschweiz.messnetz-automatisch/ch
 STATION_TYPE_PRECIPITATION = "Précipitation"
 STATION_TYPE_WEATHER = "Station météo"
 
+MS_VERSIONS_URL = "https://www.meteoswiss.admin.ch/product/output/versions.json"
 MS_24FORECAST_URL = (
-    "https://www.meteosuisse.admin.ch/product/output/forecast-chart/{}/fr/{}00.json"
+    "https://www.meteosuisse.admin.ch/product/output/forecast-chart/version__{}/fr/{}00.json"
 )
 MS_24FORECAST_REF = "https://www.meteosuisse.admin.ch//content/meteoswiss/fr/home.mobile.meteo-products--overview.html"
 
@@ -189,15 +188,9 @@ class meteoSwissClient:
         s = requests.Session()
         # Forcing headers to avoid 500 error when downloading file
         s.headers.update(_HEADERS)
-        searchUrl = MS_SEARCH_URL.format(self._postCode)
-        _LOGGER.debug("Main URL : %s" % searchUrl)
-        tmpSearch = s.get(searchUrl, timeout=10)
-
-        soup = BeautifulSoup(tmpSearch.text, features="html.parser")
-        widgetHtml = soup.find_all("section", {"id": "weather-widget"})
-        jsonUrl = widgetHtml[0].get("data-json-url")
-        jsonUrl = str(jsonUrl)
-        version = jsonUrl.split("/")[5]
+        _LOGGER.debug("Main URL : %s" % MS_VERSIONS_URL)
+        versionsResponse = s.get(MS_VERSIONS_URL, timeout=10)
+        version = json.loads(versionsResponse.text).get('forecast-chart')
         forecastUrl = MS_24FORECAST_URL.format(version, self._postCode)
         _LOGGER.debug("Data URL : %s" % forecastUrl)
         s.headers.update(
