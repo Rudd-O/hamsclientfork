@@ -30,6 +30,7 @@ _HEADERS = {
 
 MS_BASE_URL = "https://www.meteosuisse.admin.ch"
 JSON_FORECAST_URL = "https://app-prod-ws.meteoswiss-app.ch/v2/forecast?plz={}00&graph_startLowResolution=true&warning=true"
+JSON_PLZ_DETAIL_URL = "https://app-prod-ws.meteoswiss-app.ch/v1/plzDetail?plz={}00"
 MS_SEARCH_URL = "https://www.meteosuisse.admin.ch/home/actualite/infos.html?ort={}&pageIndex=0&tab=search_tab"
 CURRENT_CONDITION_URL = (
     "https://data.geo.admin.ch/ch.meteoschweiz.messwerte-aktuell/VQHA80.csv"
@@ -82,6 +83,7 @@ class HourlyForecast(TypedDict):
     precipitationMax: float
     precipitationMean: float
     precipitationMin: float
+    condition: int | None
 
 
 def HourlyForecast_from_meteoswiss_data(data: dict[str, Any]) -> list[HourlyForecast]:
@@ -109,10 +111,69 @@ def HourlyForecast_from_meteoswiss_data(data: dict[str, Any]) -> list[HourlyFore
             precipitationMin=data["precipitationMin1h"][idx],
             precipitationMean=data["precipitationMean1h"][idx],
             precipitationMax=data["precipitationMax1h"][idx],
+            condition=None,
         )
         results.append(d)
         time = time + datetime.timedelta(hours=1)
     return results
+
+
+def enrich_hourly_forecast_conditions_from_plz_detail(
+    hourly_forecast: list[HourlyForecast], data: dict[str, Any] | None
+) -> list[HourlyForecast]:
+    """
+    Enrich the hourly forecast with condition icons from the PLZ detail data when available.
+
+    The PLZ detail data contains 3-hourly condition icons, so we match them to the hourly forecast entries based on
+    their timestamps.
+    """
+    if data is None:
+        return hourly_forecast
+
+    graph = data.get("graph")
+    if not isinstance(graph, dict):
+        return hourly_forecast
+
+    start_low_resolution = graph.get("startLowResolution")
+    if start_low_resolution is None:
+        return hourly_forecast
+
+    weather_icon_3h = graph.get("weatherIcon3h")
+    if not isinstance(weather_icon_3h, list):
+        return hourly_forecast
+
+    def intornone(val: Any) -> int | None:
+        if val is None or val == "":
+            return None
+        return int(val)
+
+    time_to_condition: dict[datetime.datetime, int | None] = {}
+    start_time = datetime.datetime.fromtimestamp(
+        start_low_resolution / 1000, tz=datetime.timezone.utc
+    )
+    for idx in range(len(weather_icon_3h)):
+        time_to_condition[start_time + datetime.timedelta(hours=idx * 3)] = intornone(
+            weather_icon_3h[idx]
+        )
+
+    latest_condition: int | None = None
+    for idx, hourly_entry in enumerate(hourly_forecast):
+        matched_condition = time_to_condition.get(hourly_entry["time"])
+        if matched_condition is not None:
+            latest_condition = matched_condition
+
+        hourly_forecast[idx] = HourlyForecast(
+            time=hourly_entry["time"],
+            temperatureMax=hourly_entry["temperatureMax"],
+            temperatureMean=hourly_entry["temperatureMean"],
+            temperatureMin=hourly_entry["temperatureMin"],
+            precipitationMin=hourly_entry["precipitationMin"],
+            precipitationMean=hourly_entry["precipitationMean"],
+            precipitationMax=hourly_entry["precipitationMax"],
+            condition=latest_condition,
+        )
+
+    return hourly_forecast
 
 
 class Forecast(TypedDict):
@@ -123,13 +184,18 @@ class Forecast(TypedDict):
 
 
 def Forecast_from_meteoswiss_data(data: dict[str, Any]) -> Forecast:
+    hourly_forecast = HourlyForecast_from_meteoswiss_data(data["graph"])
+    hourly_forecast = enrich_hourly_forecast_conditions_from_plz_detail(
+        hourly_forecast, data.get("plzDetail")
+    )
+
     return Forecast(
         plz=data["plz"],
         currentWeather=data["currentWeather"],
         regionForecast=[
             DayForecast_from_meteoswiss_data(x) for x in data["regionForecast"]
         ],
-        regionHourlyForecast=HourlyForecast_from_meteoswiss_data(data["graph"]),
+        regionHourlyForecast=hourly_forecast,
     )
 
 
@@ -201,14 +267,16 @@ class ClientResult(TypedDict):
 
 
 def ClientResult_from_meteoswiss_data(data: dict[str, Any]) -> ClientResult:
-    if not data["forecast"].get("plz"):  # PLZ came back as zero or None, no forecast
+    # PLZ came back as zero or None, no forecast
+    if not data["forecast"].get("plz"):
         forecast = None
     else:
         forecast = Forecast_from_meteoswiss_data(data["forecast"])
     return ClientResult(
         name=data["name"],
         forecast=forecast,
-        condition=[CurrentCondition_from_meteoswiss_data(x) for x in data["condition"]],
+        condition=[CurrentCondition_from_meteoswiss_data(
+            x) for x in data["condition"]],
         condition_by_station={
             station: CurrentCondition_from_meteoswiss_data(condition)
             for (station, condition) in data["condition_by_station"].items()
@@ -291,6 +359,21 @@ class meteoSwissClient:
         jsonData.raise_for_status()
         jsonObj = jsonData.json()
 
+        # Keep the current 1-hour forecast endpoint as source of truth,
+        # then enrich it with 3-hour condition icons when available.
+        plzDetailUrl = JSON_PLZ_DETAIL_URL.format(self._postCode)
+        _LOGGER.debug(
+            "Fetching 3-hour condition data from URL %s", plzDetailUrl)
+        try:
+            plzDetailData = s.get(plzDetailUrl, timeout=10)
+            plzDetailData.raise_for_status()
+            jsonObj["plzDetail"] = plzDetailData.json()
+        except requests.RequestException:
+            _LOGGER.exception(
+                "Could not fetch 3-hour condition data from MeteoSwiss URL %s",
+                plzDetailUrl,
+            )
+
         self._forecast = jsonObj
         _LOGGER.debug("End of forecast update")
 
@@ -314,7 +397,8 @@ class meteoSwissClient:
             _LOGGER.debug("Get current condition for : %s" % station)
             stationData = [d for d in data if d["Station/Location"] == station]
             _LOGGER.debug("stationData: %s", stationData)
-            rainData = [d for d in rain_data if d["Station/Location"] == station]
+            rainData = [
+                d for d in rain_data if d["Station/Location"] == station]
             _LOGGER.debug("rainData: %s", rainData)
             if rainData and not stationData:
                 stationData = rainData
@@ -365,7 +449,8 @@ class meteoSwissClient:
             elif line["Type de station"] == STATION_TYPE_WEATHER:
                 stationData["type"] = StationType.WEATHER
             else:
-                _LOGGER.debug("unknown station type %s" % line["Type de station"])
+                _LOGGER.debug("unknown station type %s" %
+                              line["Type de station"])
             stationList[stationData["code"]] = stationData
         return stationList
 
@@ -418,7 +503,8 @@ class meteoSwissClient:
         try:
             return self._allStations[stationId]["name"]
         except Exception:
-            _LOGGER.warning("Unable to find station name for : %s" % (stationId))
+            _LOGGER.warning(
+                "Unable to find station name for : %s" % (stationId))
             return None
 
     def getGeoData(self, lat, lon, user_agent=None):
@@ -439,7 +525,8 @@ class meteoSwissClient:
             _LOGGER.debug("Got data from OpenStreetMap: %s" % (geoData))
             return geoData
         except Exception:
-            _LOGGER.exception("Cannot get Nominatim OSM data: %s", geoData_req.text)
+            _LOGGER.exception(
+                "Cannot get Nominatim OSM data: %s", geoData_req.text)
             raise
 
     def getPostCode(self, lat, lon):
@@ -448,7 +535,8 @@ class meteoSwissClient:
             return geoData["address"]["postcode"]
         except Exception:
             _LOGGER.warning(
-                "Unable to get post code for location lat : %s lon : %s" % (lat, lon)
+                "Unable to get post code for location lat : %s lon : %s" % (
+                    lat, lon)
             )
             return None
 
