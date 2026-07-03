@@ -317,11 +317,14 @@ class meteoSwissClient:
             if rainData and not stationData:
                 stationData = rainData
             elif rainData and stationData:
-                # Add all values from the rain data to the station data.
-                for k, v in rainData.items():
-                    stationData[k] = v
+                # Merge the precipitation measurements into the station's
+                # weather row. Both are single-row lists filtered by station,
+                # so operate on the row dicts (the previous code called
+                # ``.items()`` / item-assignment on the *lists*, which raised
+                # AttributeError / TypeError whenever a station appeared in
+                # both the weather and the precipitation dataset).
+                stationData[0].update(rainData[0])
             else:
-                # if
                 # (stationData and not rainData)
                 # or
                 # (not stationData and not rainData)
