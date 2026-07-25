@@ -2,11 +2,10 @@ import io
 import os
 import re
 
-from setuptools import find_packages
-from setuptools import setup
+from setuptools import find_packages, setup
 
 
-def read(filename):
+def read(filename: str):
     filename = os.path.join(os.path.dirname(__file__), filename)
     text_type = type("")
     with io.open(filename, mode="r", encoding="utf-8") as fd:
@@ -15,7 +14,13 @@ def read(filename):
 
 setup(
     name="hamsclientfork",
-    version="0.2.19",
+    version=[
+        ln
+        for ln in read("hamsclientfork/__init__.py").splitlines()
+        if ln.startswith("__version__")
+    ][0]
+    .partition(" = ")[2]
+    .replace('"', ""),
     url="https://github.com/Rudd-O/hamsclientfork",
     license="MIT",
     author="websylv",
