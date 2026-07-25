@@ -1,14 +1,14 @@
-import geopy
-import geopy.distance
+import csv
+import datetime
 import json
 import logging
-import requests  # type: ignore
-import datetime
-import csv
-
-from bs4 import BeautifulSoup
 from enum import Enum
 from typing import Any, TypedDict
+
+import geopy
+import geopy.distance
+import requests  # type: ignore
+from bs4 import BeautifulSoup
 
 
 class StationType(str, Enum):
@@ -313,13 +313,16 @@ class meteoSwissClient:
         for station in self._stations:
             _LOGGER.debug("Get current condition for : %s" % station)
             stationData = [d for d in data if d["Station/Location"] == station]
+            _LOGGER.debug("stationData: %s", stationData)
             rainData = [d for d in rain_data if d["Station/Location"] == station]
+            _LOGGER.debug("rainData: %s", rainData)
             if rainData and not stationData:
                 stationData = rainData
             elif rainData and stationData:
-                # Add all values from the rain data to the station data.
-                for k, v in rainData.items():
-                    stationData[k] = v
+                # Add all values from each rain data to each station data.
+                for sd, rd in zip(stationData, rainData):
+                    for k, v in rd.items():
+                        sd[k] = v
             else:
                 # if
                 # (stationData and not rainData)
