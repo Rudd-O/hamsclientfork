@@ -61,6 +61,8 @@ class DayForecast(TypedDict):
     temperatureMax: float
     temperatureMin: float
     precipitation: float
+    precipitationMin: float
+    precipitationMax: float
 
 
 def DayForecast_from_meteoswiss_data(data: dict[str, Any]) -> DayForecast:
@@ -71,6 +73,8 @@ def DayForecast_from_meteoswiss_data(data: dict[str, Any]) -> DayForecast:
         temperatureMax=float(data["temperatureMax"]),
         temperatureMin=float(data["temperatureMin"]),
         precipitation=float(data["precipitation"]),
+        precipitationMin=float(data.get("precipitationMin", data["precipitation"])),
+        precipitationMax=float(data.get("precipitationMax", data["precipitation"])),
     )
 
 
@@ -115,11 +119,17 @@ def HourlyForecast_from_meteoswiss_data(data: dict[str, Any]) -> list[HourlyFore
     return results
 
 
+class Warning(TypedDict):
+    warnType: int
+    warnLevel: int
+
+
 class Forecast(TypedDict):
     plz: str
     currentWeather: CurrentWeather
     regionForecast: list[DayForecast]
     regionHourlyForecast: list[HourlyForecast]
+    warningsOverview: list[Warning]
 
 
 def Forecast_from_meteoswiss_data(data: dict[str, Any]) -> Forecast:
@@ -130,6 +140,7 @@ def Forecast_from_meteoswiss_data(data: dict[str, Any]) -> Forecast:
             DayForecast_from_meteoswiss_data(x) for x in data["regionForecast"]
         ],
         regionHourlyForecast=HourlyForecast_from_meteoswiss_data(data["graph"]),
+        warningsOverview=data.get("warningsOverview", []),
     )
 
 
