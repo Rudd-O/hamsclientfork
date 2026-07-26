@@ -30,6 +30,7 @@ _HEADERS = {
 
 MS_BASE_URL = "https://www.meteosuisse.admin.ch"
 JSON_FORECAST_URL = "https://app-prod-ws.meteoswiss-app.ch/v2/forecast?plz={}00&graph_startLowResolution=true&warning=true"
+# The Swiss Meteo enrichment payload also includes warnings, which may be useful later.
 JSON_PLZ_DETAIL_URL = "https://app-prod-ws.meteoswiss-app.ch/v1/plzDetail?plz={}00"
 MS_SEARCH_URL = "https://www.meteosuisse.admin.ch/home/actualite/infos.html?ort={}&pageIndex=0&tab=search_tab"
 CURRENT_CONDITION_URL = (
@@ -183,10 +184,12 @@ class Forecast(TypedDict):
     regionHourlyForecast: list[HourlyForecast]
 
 
-def Forecast_from_meteoswiss_data(data: dict[str, Any]) -> Forecast:
+def Forecast_from_meteoswiss_data(
+    data: dict[str, Any], plz_detail_data: dict[str, Any] | None
+) -> Forecast:
     hourly_forecast = HourlyForecast_from_meteoswiss_data(data["graph"])
     hourly_forecast = enrich_hourly_forecast_conditions_from_plz_detail(
-        hourly_forecast, data.get("plzDetail")
+        hourly_forecast, plz_detail_data
     )
 
     return Forecast(
@@ -266,12 +269,15 @@ class ClientResult(TypedDict):
     condition_by_station: dict[str, CurrentCondition]
 
 
-def ClientResult_from_meteoswiss_data(data: dict[str, Any]) -> ClientResult:
+def ClientResult_from_meteoswiss_data(
+    data: dict[str, Any], plz_detail_data: dict[str, Any] | None
+) -> ClientResult:
     # PLZ came back as zero or None, no forecast
     if not data["forecast"].get("plz"):
         forecast = None
     else:
-        forecast = Forecast_from_meteoswiss_data(data["forecast"])
+        forecast = Forecast_from_meteoswiss_data(
+            data["forecast"], plz_detail_data)
     return ClientResult(
         name=data["name"],
         forecast=forecast,
@@ -313,7 +319,10 @@ class meteoSwissClient:
 
     def get_typed_data(self) -> ClientResult:
         data = self.get_data()
-        return ClientResult_from_meteoswiss_data(data)
+        plz_detail_data = None
+        if self._forecast is not None:
+            plz_detail_data = self._forecast.get("plzDetail")
+        return ClientResult_from_meteoswiss_data(data, plz_detail_data)
 
     def get_24hforecast(self):
         _LOGGER.debug("Start update 24h forecast data")
