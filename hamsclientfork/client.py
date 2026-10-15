@@ -289,10 +289,108 @@ class meteoSwissClient:
         _LOGGER.debug("Start update forecast data with URL %s", jsonUrl)
         jsonData = s.get(jsonUrl, timeout=10)
         jsonData.raise_for_status()
-        jsonObj = jsonData.json()
+
+        # The API historically returned JSON, but since ~Oct 2026 it returns
+        # XML (application/xhtml+xml) regardless of the Accept header.
+        # Parse whichever we get so the integration keeps working.
+        try:
+            jsonObj = jsonData.json()
+        except (json.JSONDecodeError, ValueError):
+            _LOGGER.debug(
+                "Forecast endpoint returned non-JSON (likely XML), parsing XML"
+            )
+            jsonObj = _forecast_xml_to_dict(jsonData.text)
 
         self._forecast = jsonObj
         _LOGGER.debug("End of forecast update")
+
+
+def _forecast_xml_to_dict(xml_text: str) -> dict[str, Any]:
+    """Convert the MeteoSwiss v2/forecast XML payload into the dict shape
+    the rest of the library expects (same keys as the old JSON response)."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_text)
+
+    def _text(el: ET.Element | None) -> str | None:
+        return el.text if el is not None else None
+
+    def _coerce(value: str | None) -> Any:
+        if value is None:
+            return None
+        value = value.strip()
+        if value == "":
+            return None
+        try:
+            if "." in value or "e" in value.lower():
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+
+    def _series(parent: ET.Element, tag: str) -> list[Any]:
+        # In the XML each value is a nested child element sharing the parent
+        # tag's name, e.g. <temperatureMin1h><temperatureMin1h>12.3</...></...>
+        el = parent.find(tag)
+        if el is None:
+            return []
+        return [_coerce(c.text) for c in el.findall(tag) if _coerce(c.text) is not None]
+
+    current = root.find("currentWeather")
+    region = root.find("regionForecast")
+    graph = root.find("graph")
+
+    current_weather: dict[str, Any] = {}
+    if current is not None:
+        current_weather = {
+            child.tag: _coerce(child.text) for child in current
+        }
+
+    region_forecast: list[dict[str, Any]] = []
+    if region is not None:
+        for day in region.findall("regionForecast"):
+            region_forecast.append(
+                {
+                    "dayDate": _text(day.find("dayDate")),
+                    "iconDay": _coerce(_text(day.find("iconDay"))),
+                    "iconDayV2": _coerce(_text(day.find("iconDayV2"))),
+                    "temperatureMax": _coerce(_text(day.find("temperatureMax"))),
+                    "temperatureMin": _coerce(_text(day.find("temperatureMin"))),
+                    "precipitation": _coerce(_text(day.find("precipitation"))),
+                }
+            )
+
+    graph_dict: dict[str, Any] = {}
+    if graph is not None:
+        graph_dict["start"] = _iso_to_ms(_text(graph.find("start")))
+        for series in (
+            "temperatureMin1h",
+            "temperatureMax1h",
+            "temperatureMean1h",
+            "precipitationMin1h",
+            "precipitationMean1h",
+            "precipitationMax1h",
+        ):
+            graph_dict[series] = _series(graph, series)
+
+    return {
+        "plz": _text(root.find("plz")),
+        "currentWeather": current_weather,
+        "regionForecast": region_forecast,
+        "graph": graph_dict,
+    }
+
+
+def _iso_to_ms(value: str | None) -> int | None:
+    """Convert an ISO-8601 timestamp (e.g. 2026-10-14T22:00:00.000Z) to a
+    millisecond epoch, matching the numeric ``start`` the JSON used to have."""
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return None
 
     def get_current_condition(self):
         _LOGGER.debug("Update current condition")
